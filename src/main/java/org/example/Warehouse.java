@@ -2,15 +2,24 @@ package org.example;
 
 import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
+import org.example.queue.WarehouseQueue;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+/**
+ * В данной реализации, выгрузкой/загрузкой грузовиков занимается поток скалада. По этой причине, в качестве механизма получения прибывшего грузовика
+ * выбрал очередь UnboundedQueue. LockFree реализация, на мой взгляд, при таком варианте разгрузки была бы излишним усложнением.
+ * Так же, из-за того, что каждый поток склада работает исключительно со своим хранилищем блоков при выгрузке/загрузке, то конкурентого доступа
+ * не происходит и синхронизация при работе с коллекцией storage не требуется.
+ */
+
 @Log4j2
 @Getter
 public class Warehouse extends Thread {
 
+    private final WarehouseQueue<Truck> truckQueue = new WarehouseQueue<>();
     private final List<Block> storage = new ArrayList<>();
 
     public Warehouse(String name) {
@@ -43,6 +52,10 @@ public class Warehouse extends Thread {
             } else {
                 unloadTruck(truck);
             }
+            synchronized (truck) {
+                // если будить с помощью notify(), то почему-то единственный поток Truck 0 не просыпается и зависает в WAIT
+                truck.notifyAll();
+            }
         }
         log.info("Warehouse thread interrupted");
 
@@ -61,17 +74,14 @@ public class Warehouse extends Thread {
     }
 
     private Collection<Block> getFreeBlocks(int maxItems) {
-        //TODO необходимо реализовать потокобезопасную логику по получению свободных блоков
-        //TODO 1 блок грузится в 1 грузовик, нельзя клонировать блоки во время загрузки
-        List<Block> blocks = new ArrayList<>();
-        for (int i = 0; i < maxItems; i++) {
-            blocks.add(new Block());
-        }
-        return blocks;
+        List<Block> freeBlocks = new ArrayList<>(storage.subList(0, Math.min(maxItems, storage.size())));
+        storage.removeAll(freeBlocks);
+
+        return freeBlocks;
     }
 
     private void returnBlocksToStorage(List<Block> returnedBlocks) {
-        //TODO реализовать потокобезопасную логику по возврату блоков на склад
+        storage.addAll(returnedBlocks);
     }
 
     private void unloadTruck(Truck truck) {
@@ -88,13 +98,19 @@ public class Warehouse extends Thread {
     }
 
     private Truck getNextArrivedTruck() {
-        //TODO необходимо реализовать логику по получению следующего прибывшего грузовика внутри потока склада
-        return null;
+        return truckQueue.deq();
     }
 
 
     public void arrive(Truck truck) {
-        //TODO необходимо реализовать логику по сообщению потоку склада о том, что грузовик приехал
-        //TODO так же дождаться разгрузки блоков, при возврате из этого метода - грузовик покинет склад
+        truckQueue.enq(truck);
+        synchronized (truck) {
+            try {
+                truck.wait();
+
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 }
